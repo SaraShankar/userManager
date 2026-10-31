@@ -56,11 +56,35 @@ exports.handleWebhook = async (req, res) => {
             const wamid = message.id;
 
             // Find user in MongoDB
-            const dbUser = await User.findOne({
+            let dbUser = await User.findOne({
               $or: [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }]
             });
 
-            const senderName = dbUser?.name || contact?.profile?.name || cleanPhone;
+            // Extract the true parent name from DB or Meta WhatsApp contact profile
+            const profileName = contact?.profile?.name;
+            const parentDisplayName =
+              (dbUser?.name && dbUser.name !== cleanPhone ? dbUser.name : null) ||
+              profileName ||
+              cleanPhone;
+
+            // Upsert / update User record so the contact name is permanently stored in MongoDB
+            if (!dbUser || (profileName && dbUser.name === cleanPhone)) {
+              dbUser = await User.findOneAndUpdate(
+                { $or: [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }] },
+                {
+                  $set: {
+                    name: parentDisplayName,
+                    phone: cleanPhone,
+                    updatedAt: new Date()
+                  },
+                  $setOnInsert: {
+                    source: 'WHATSAPP_INBOUND',
+                    createdAt: new Date()
+                  }
+                },
+                { upsert: true, returnDocument: 'after' }
+              );
+            }
 
             let messageText = '';
             switch (message.type) {
@@ -80,14 +104,14 @@ exports.handleWebhook = async (req, res) => {
                 messageText = `[Received ${message.type}]`;
             }
 
-            // Save incoming message in MongoDB
+            // Save incoming message in MongoDB (attaching parentDisplayName to senderName)
             await Message.findOneAndUpdate(
               { wamid },
               {
                 $setOnInsert: {
                   wamid,
                   phone: cleanPhone,
-                  senderName,
+                  senderName: parentDisplayName,
                   direction: 'inbound',
                   text: messageText,
                   status: 'received',
@@ -98,7 +122,7 @@ exports.handleWebhook = async (req, res) => {
               { upsert: true, returnDocument: 'after' }
             );
 
-            console.log(`📥 Incoming WhatsApp from ${cleanPhone} (${senderName}): "${messageText}"`);
+            console.log(`📥 Incoming WhatsApp from ${cleanPhone} (${parentDisplayName}): "${messageText}"`);
 
             // Ignore self-echoes or messages originating from the admin number
             if (cleanPhone === ADMIN_FORWARD_PHONE) {
@@ -113,21 +137,24 @@ exports.handleWebhook = async (req, res) => {
                   cleanPhone,
                   messageText,
                   0.70,
-                  senderName
+                  parentDisplayName
                 );
 
                 if (autoReplyResult.handled) {
-                  // A. Normal FAQ Match -> Saved to messages collection
+                  // A. Normal FAQ Match
+                  // Preserve parentDisplayName in senderName so conversation aggregations do not display bot personas
                   if (autoReplyResult.type === 'faq_match') {
                     await Message.create({
                       wamid: autoReplyResult.wamid || `bot_${Date.now()}`,
                       phone: cleanPhone,
-                      senderName: 'Abacus AI Copilot',
+                      senderName: parentDisplayName,
+                      botPersona: 'Abacus AI Copilot',
                       direction: 'outbound',
                       text: autoReplyResult.answer,
                       status: 'sent',
                       metadata: {
                         isAutomated: true,
+                        botName: 'Abacus AI Copilot',
                         matchedFaqId: autoReplyResult.matchedFaqId,
                         confidenceScore: autoReplyResult.score
                       },
@@ -139,27 +166,30 @@ exports.handleWebhook = async (req, res) => {
 
                   // B. Unmatched Fallback -> Save holding message & admin alert log
                   if (autoReplyResult.type === 'forwarded_to_admin') {
-                    // Record holding message sent to parent
+                    // Holding message to parent preserves parentDisplayName
                     await Message.create({
                       wamid: autoReplyResult.parentWamid || `bot_fallback_${Date.now()}`,
                       phone: cleanPhone,
-                      senderName: 'Abacus AI Copilot',
+                      senderName: parentDisplayName,
+                      botPersona: 'Abacus AI Copilot',
                       direction: 'outbound',
                       text: autoReplyResult.answer,
                       status: 'sent',
                       metadata: {
                         isAutomated: true,
+                        botName: 'Abacus AI Copilot',
                         escalatedToAdmin: true,
                         confidenceScore: autoReplyResult.score
                       },
                       timestamp: new Date()
                     });
 
-                    // Record notification dispatched to admin
+                    // Forwarding notification dispatched to admin
                     await Message.create({
                       wamid: autoReplyResult.adminWamid || `admin_alert_${Date.now()}`,
                       phone: ADMIN_FORWARD_PHONE,
                       senderName: 'Abacus Lead Escalator',
+                      botPersona: 'Abacus Lead Escalator',
                       direction: 'outbound',
                       text: autoReplyResult.adminAlertText,
                       status: 'sent',
