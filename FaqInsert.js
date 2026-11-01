@@ -1,45 +1,45 @@
-const { OpenAI } = require('openai');
-const mongoose = require('mongoose');
-const FaqVector = require('./models/faqVectorSchema');
 require('dotenv').config();
+const mongoose = require('mongoose');
+const { OpenAI } = require('openai');
+const FaqVector = require('./models/faqVectorSchema');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function run() {
-  const mongoUri =
-    process.env.MONGODB_URI_100SUM ||
-    process.env.MONGODB_URI ||
-    process.env.MONGO_URI ||
-    process.env.DATABASE_URL;
+async function updateScreenTimeFaq() {
+  await mongoose.connect(process.env.MONGODB_URI_100SUM || process.env.MONGO_URI);
 
-  if (!mongoUri) {
-    console.error("❌ MongoDB connection URI is missing from your .env file!");
-    process.exit(1);
-  }
+  const question = "I am concerned about screen time and avoiding phone addiction, but your course uses digital tools. Why are apps required?";
+  const answer = 
+    "We completely share your focus on avoiding passive phone and screen addiction. In our program, screen tools are never used for passive entertainment or repetitive drills. Learning abacus happens in two distinct stages:\n\n" +
+    "1. Physical Abacus Stage: Children start exclusively with the physical abacus frame, workbooks, and direct teacher guidance. During this stage, errors are physical and immediately visible for teachers to guide and correct.\n\n" +
+    "2. Mental Abacus Stage (Bead Visualization / Anzan): Once a child is fluent with the physical tool, they transition to internal visualization. At this advanced level, human observation alone cannot track the mental images inside a child's mind. Our specialized tools (TableClock, GearAnzan, OralPod, BingoBead) are essential to systematically assess mental skill levels, provide 50 stages of visualization, and offer structured error correction.\n\n" +
+    "Phased & Purpose-Driven: Digital tools are introduced only after physical proficiency is proven. By targeting internal visualization, these dedicated home tools empower students to develop mental arithmetic 3x to 4x faster with purposeful, short brain training rather than aimless screen time.";
 
-  await mongoose.connect(mongoUri);
-
-  const question = "Can parents sit in, observe, or visit the classroom to see if it is suitable?";
-  const answer = "To maintain an uninterrupted, distraction-free learning environment and ensure young children remain comfortable and focused without anxiety or panic, we do not permit parents or visitors inside the active classroom. Instead, your child can attend a structured 1-on-1 assessment and interactive trial where you receive full feedback on their readiness and comfort level. You can book an assessment slot here: https://cal.com/abacusforkids/abacus-trial-session";
-
-  console.log("Generating embedding...");
+  const input = `${question} ${answer}`.replace(/\s+/g, ' ').trim();
   const embRes = await openai.embeddings.create({
     model: 'text-embedding-3-small',
-    input: `${question} ${answer}`.replace(/\n/g, ' ')
+    input
   });
 
-  await FaqVector.create({
-    id: "faq_classroom_visit_policy",
-    question,
-    answer,
-    embedding: embRes.data[0].embedding,
-    metadata: { 
-      category: "Logistics & Formats" 
-    }
-  });
+  await FaqVector.findOneAndUpdate(
+    { id: 'faq_screen_time_and_digital_tools' },
+    {
+      $set: {
+        id: 'faq_screen_time_and_digital_tools',
+        question,
+        answer,
+        embedding: embRes.data[0].embedding,
+        metadata: {
+          category: 'Pedagogy & Digital Tools',
+          updatedAt: new Date()
+        }
+      }
+    },
+    { upsert: true, returnDocument: 'after' }
+  );
 
-  console.log("✅ Classroom policy FAQ inserted successfully!");
+  console.log("✅ Screen time & digital tools FAQ indexed successfully!");
   process.exit(0);
 }
 
-run();
+updateScreenTimeFaq();
