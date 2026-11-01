@@ -1,11 +1,10 @@
 const User = require('../models/userSchema');
 const whatsappService = require('../services/whatsappService');
 
-// Helper: Generates a short, professional certificate reference (e.g., AFK-2026-8A3F)
+// Helper: Generates an authentic certification ID matching your AFK prefix standard
 const generateCertificateId = () => {
-  const year = new Date().getFullYear();
-  const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `AFK-${year}-${randomSuffix}`;
+  const randomSuffix = Math.random().toString(36).substring(2, 7).toUpperCase();
+  return `AFK-${randomSuffix}`;
 };
 
 // 1. Check Duplicate Handler
@@ -23,9 +22,16 @@ exports.checkDuplicate = async (req, res) => {
     });
 
     if (existingUser) {
+      // Returns structure strictly mapped to backendResult in Vue proceedRegistration
       return res.status(200).json({
         isDuplicate: true,
-        data: existingUser
+        data: {
+          _id: existingUser._id,
+          certificateId: existingUser.certificateId || 'AFK-GEN',
+          qrCodeUrl: `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${existingUser._id}`,
+          enrollmentStatus: existingUser.enrollmentStatus || 'PROMO_CLAIMED',
+          promotionCode: existingUser.promotionCode || 'PRACTICE25'
+        }
       });
     }
 
@@ -36,22 +42,22 @@ exports.checkDuplicate = async (req, res) => {
   }
 };
 
-// 2. Save Assessment, Issue Certificate & Send WhatsApp Confirmation
+// 2. Save Assessment & Issue Certification
 exports.saveAssessment = async (req, res) => {
   try {
     const body = req.body;
     const cleanPhone = (body.parentPhone || '').replace(/\D/g, '');
     const cleanEmail = (body.parentEmail || '').trim().toLowerCase();
 
-    // Query by either phone OR email to prevent E11000 duplicate key conflicts
+    // Query to avoid E11000 duplicate index conflicts
     const queryConditions = [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }];
     if (cleanEmail) {
       queryConditions.push({ email: cleanEmail });
     }
 
-    // Generate certificate metadata
     const certId = generateCertificateId();
-    const issueDate = new Date();
+    const promoCode = 'BIGOFFER50';
+    const status = 'PROMO_CLAIMED';
 
     const record = await User.findOneAndUpdate(
       { $or: queryConditions },
@@ -63,11 +69,12 @@ exports.saveAssessment = async (req, res) => {
           postcode: body.parentPostcode,
           assessmentScores: body.scores,
           certificateId: certId,
-          certificateIssuedAt: issueDate,
-          updatedAt: issueDate
+          promotionCode: promoCode,
+          enrollmentStatus: status,
+          updatedAt: new Date()
         },
         $setOnInsert: {
-          createdAt: issueDate,
+          createdAt: new Date(),
           source: 'ASSESSMENT_APP',
           status: 'lead'
         }
@@ -75,19 +82,18 @@ exports.saveAssessment = async (req, res) => {
       { upsert: true, returnDocument: 'after' }
     );
 
-    // Dynamic QR & Certificate URLs pointing to this record
     const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${record._id}`;
-    const certificateUrl = `https://abacusforkids.co.uk/certificate?id=${record._id}&cert=${certId}`;
 
-    // Send WhatsApp Cloud API confirmation message with certificate access
+    // Dispatch WhatsApp confirmation to parent
     if (cleanPhone) {
       try {
         const textBody = 
           `🎉 *Congratulations!* ${body.studentFirstName} has successfully completed the Abacus Assessment!\n\n` +
           `📜 *Certificate ID:* ${certId}\n` +
-          `🔗 *View Official Certificate:* ${certificateUrl}\n\n` +
-          `Our team in Bushey/Harrow will review the scores and follow up with your child's personalized evaluation shortly.`;
-        
+          `🎁 *Special Promo Code:* ${promoCode}\n\n` +
+          `Your official digital certificate is displayed on your screen. You can scan or save your QR verification directly.\n\n` +
+          `Our team in Bushey/Harrow will review your child's numeracy evaluation shortly.`;
+
         if (typeof whatsappService.sendMessage === 'function') {
           await whatsappService.sendMessage(cleanPhone, textBody);
         } else if (typeof whatsappService.sendTextMessage === 'function') {
@@ -98,11 +104,15 @@ exports.saveAssessment = async (req, res) => {
       }
     }
 
+    // Exact response structure consumed by submitLeadData in your Vue app
     return res.status(200).json({
       success: true,
-      data: record,
-      certificateId: certId,
-      certificateUrl,
+      data: {
+        _id: record._id,
+        certificateId: certId,
+        enrollmentStatus: status,
+        promotionCode: promoCode
+      },
       qrCodeUrl
     });
   } catch (err) {
@@ -114,8 +124,8 @@ exports.saveAssessment = async (req, res) => {
 // 3. Callback Request Handler
 exports.requestCallback = async (req, res) => {
   try {
-    const { recordId, parentPhone } = req.body;
-    console.log(`📞 Callback requested for ${parentPhone || recordId}`);
+    const { recordId, parentPhone, parentEmail } = req.body;
+    console.log(`📞 Callback requested for ${parentPhone || parentEmail || recordId}`);
     return res.status(200).json({ success: true, message: 'Callback request registered.' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
