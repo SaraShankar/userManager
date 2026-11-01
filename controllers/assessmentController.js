@@ -1,9 +1,5 @@
-const axios = require('axios');
 const User = require('../models/userSchema');
-
-// Replace or ensure you have an Assessment model or use User model
-const WHATSAPP_PHONE_ID = '1443484902172789';
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || process.env.META_ACCESS_TOKEN;
+const whatsappService = require('../services/whatsappService');
 
 // 1. Check Duplicate Handler
 exports.checkDuplicate = async (req, res) => {
@@ -12,7 +8,10 @@ exports.checkDuplicate = async (req, res) => {
     const cleanPhone = (parentPhone || '').replace(/\D/g, '');
 
     const existingUser = await User.findOne({
-      $or: [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }],
+      $or: [
+        { phone: cleanPhone },
+        { phone: `+${cleanPhone}` }
+      ],
       ...(studentDob ? { 'student.dob': studentDob } : {})
     });
 
@@ -35,49 +34,46 @@ exports.saveAssessment = async (req, res) => {
   try {
     const body = req.body;
     const cleanPhone = (body.parentPhone || '').replace(/\D/g, '');
+    const cleanEmail = (body.parentEmail || '').trim().toLowerCase();
 
-    // Upsert or save student assessment data into MongoDB
+    // Query by either phone OR email to prevent E11000 duplicate key conflicts
+    const queryConditions = [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }];
+    if (cleanEmail) {
+      queryConditions.push({ email: cleanEmail });
+    }
+
     const record = await User.findOneAndUpdate(
-      { $or: [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }] },
+      { $or: queryConditions },
       {
         $set: {
           name: `${body.studentFirstName} ${body.studentSurname || ''}`.trim(),
           phone: cleanPhone,
-          email: body.parentEmail,
+          ...(cleanEmail ? { email: cleanEmail } : {}),
           postcode: body.parentPostcode,
           assessmentScores: body.scores,
           updatedAt: new Date()
         },
         $setOnInsert: {
           createdAt: new Date(),
-          source: 'ASSESSMENT_APP'
+          source: 'ASSESSMENT_APP',
+          status: 'lead'
         }
       },
       { upsert: true, returnDocument: 'after' }
     );
 
-    // Send WhatsApp Cloud API confirmation message
-    if (cleanPhone && WHATSAPP_TOKEN) {
+    // Send WhatsApp Cloud API confirmation message via your service helper
+    if (cleanPhone) {
       try {
-        await axios.post(
-          `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_ID}/messages`,
-          {
-            messaging_product: 'whatsapp',
-            to: cleanPhone,
-            type: 'text',
-            text: {
-              body: `🎉 Congratulations! ${body.studentFirstName} has completed the Abacus Assessment!\n\nOur team in Bushey/Harrow will review the assessment scores and follow up with your report shortly.`
-            }
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
+        const textBody = `🎉 Congratulations! ${body.studentFirstName} has completed the Abacus Assessment!\n\nOur team in Bushey/Harrow will review the assessment scores and follow up with your report shortly.`;
+        
+        if (typeof whatsappService.sendMessage === 'function') {
+          await whatsappService.sendMessage(cleanPhone, textBody);
+        } else if (typeof whatsappService.sendTextMessage === 'function') {
+          await whatsappService.sendTextMessage(cleanPhone, textBody);
+        }
       } catch (waErr) {
-        console.error('Failed to send WhatsApp confirmation:', waErr.response?.data || waErr.message);
+        console.error('Failed to send WhatsApp confirmation:', waErr.message);
       }
     }
 
