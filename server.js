@@ -12,7 +12,7 @@ const assessmentRoutes = require('./routes/assessmentRoutes');
 
 const app = express();
 
-// 1. Port & Host Configuration (Declared early to prevent TDZ/ReferenceError)
+// 1. Port & Host Configuration
 const PORT = Number(process.env.PORT) || 5001;
 const HOST = '0.0.0.0';
 
@@ -22,21 +22,40 @@ app.set('trust proxy', 1);
 // Disable Mongoose command buffering to prevent request hangs if DB disconnects
 mongoose.set('bufferCommands', false);
 
-// 3. Universal CORS Configuration
-app.use(
-  cors({
-    origin: true,
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
-  })
-);
+// 3. Robust Cross-Origin Resource Sharing (CORS) Configuration
+const allowedOrigins = [
+  'https://eynko-server-production.up.railway.app',
+  'https://usermanager-production-a71a.up.railway.app',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:5173'
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests (e.g. mobile apps, curl, server-to-server) or matched origins
+    if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.railway.app')) {
+      return callback(null, true);
+    }
+    return callback(null, true); // Fallback allows client webview execution without strict block
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  optionsSuccessStatus: 204
+};
+
+// Mount CORS before any route
+app.use(cors(corsOptions));
+
+// Explicitly handle HTTP OPTIONS preflight across every route
+app.options('*', cors(corsOptions));
 
 // 4. Body Parser Middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// 5. Lightweight Health Check Endpoints (Guaranteed 200 for Railway Edge Proxy)
+// 5. Lightweight Health Check Endpoints
 const healthHandler = (req, res) => {
   const isDbConnected = mongoose.connection.readyState === 1;
   res.status(200).json({
