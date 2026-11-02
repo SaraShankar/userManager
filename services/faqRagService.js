@@ -6,19 +6,37 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // Scores below 0.70 indicate weak semantic relevance to your stored FAQs
 const SIMILARITY_THRESHOLD = 0.70;
 
-async function askFaqAssistant(userQuestion) {
+/**
+ * Answers incoming parent questions using Atlas Vector Search + OpenAI RAG.
+ * @param {string} userQuestion - The question sent by the parent.
+ * @param {object} [userContext] - Optional context: { phone, name }
+ */
+async function askFaqAssistant(userQuestion, userContext = {}) {
   if (!userQuestion || typeof userQuestion !== 'string') {
     throw new Error('Valid userQuestion string is required');
   }
 
-  // 1. Vectorize the incoming question
+  // 1. Clean incoming sender phone & name for prefilled link generation
+  const cleanPhone = (userContext.phone || '').replace(/\D/g, '');
+  const encodedName = encodeURIComponent((userContext.name || '').trim());
+
+  // Construct personalized assessment URL using /assessment/
+  let assessmentLink = 'https://eynko-server-production.up.railway.app/assessment/';
+  const queryParams = [];
+  if (cleanPhone) queryParams.push(`phone=${cleanPhone}`);
+  if (encodedName) queryParams.push(`name=${encodedName}`);
+  if (queryParams.length > 0) {
+    assessmentLink += `?${queryParams.join('&')}`;
+  }
+
+  // 2. Vectorize the incoming question
   const embeddingResponse = await openai.embeddings.create({
     model: 'text-embedding-3-small',
     input: userQuestion.trim(),
   });
   const queryVector = embeddingResponse.data[0].embedding;
 
-  // 2. Query Atlas Vector Search
+  // 3. Query Atlas Vector Search
   const pipeline = [
     {
       $vectorSearch: {
@@ -57,15 +75,13 @@ async function askFaqAssistant(userQuestion) {
     };
   }
 
-  // 3. Assemble Grounding Context
+  // 4. Assemble Grounding Context
   const contextText = matchedDocs
-    .map(
-      (doc, idx) => `[Source ${idx + 1} - ${doc.id}]\nQuestion: ${doc.question}\nAnswer: ${doc.answer}`
-    )
+    .map((doc, idx) => `[Source ${idx + 1} (${doc.id})]\nQuestion: ${doc.question}\nAnswer: ${doc.answer}`)
     .join('\n\n---\n\n');
 
-  // Layer 2 Safeguard: Strict refusal rule in system prompt
-  const systemPrompt = `You are the official parent-support AI assistant for Dr. Geetha's AbacusForKids program.
+  // Layer 2 Safeguard: Grounded system instructions
+  const systemPrompt = `You are the official parent-support AI assistant for Dr. Geetha's AbacusForKids program in Bushey, Harrow, and Kenton.
 
 STRICT INSTRUCTIONS:
 1. Answer the question relying EXCLUSIVELY on the facts provided in the VERIFIED KNOWLEDGE below.
@@ -74,17 +90,17 @@ STRICT INSTRUCTIONS:
 4. If the answer IS explicitly supported by the context:
    - Provide an empathetic, authoritative, and concise response.
    - Mention key concepts where relevant: 10-20 min daily home practice as a "brain warm-up", the bi-quinary 1+4 abacus frame reducing workload by ~75%, and 11+ grammar school pathways.
-   - Where helpful, provide the trial booking link: https://cal.com/abacusforkids/abacus-trial-session
-   - Where helpful, provide the assessment link: https://eynko-server-production.up.railway.app/assessment/`;
+   - When discussing trial sessions, offer this link: https://cal.com/abacusforkids/abacus-trial-session
+   - When discussing skill level, enrollment readiness, or assessments, invite the parent to use this personalized assessment link: ${assessmentLink}`;
 
-  // 4. Generate AI Completion
+  // 5. Generate AI Completion
   const chatResponse = await openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [
       { role: 'system', content: `${systemPrompt}\n\n=== VERIFIED KNOWLEDGE ===\n${contextText}` },
       { role: 'user', content: userQuestion.trim() },
     ],
-    temperature: 0.1, // Reduced temperature to minimize hallucination and enforce rule following
+    temperature: 0.1,
   });
 
   const completionText = (chatResponse.choices[0]?.message?.content || '').trim();

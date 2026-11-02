@@ -34,40 +34,49 @@ exports.verifyWebhook = (req, res) => {
  * Incoming Webhook Receiver (POST)
  */
 exports.handleWebhook = async (req, res) => {
+  // Acknowledge receipt to Meta immediately (prevents duplicate retries/timeouts)
   res.status(200).send('EVENT_RECEIVED');
 
   try {
     const body = req.body;
+    if (!body?.object) return;
 
-    // --- A. Process WhatsApp Business Events ---
-    if (body?.object === 'whatsapp_business_account') {
+    // =========================================================================
+    // A. PROCESS WHATSAPP BUSINESS EVENTS
+    // =========================================================================
+    if (body.object === 'whatsapp_business_account') {
       for (const entry of body.entry || []) {
         for (const change of entry.changes || []) {
           const value = change?.value;
           if (!value) continue;
 
-          // 1. Process incoming WhatsApp messages
-          if (value.messages && value.messages.length > 0) {
+          // 1. Inbound Messages
+          if (Array.isArray(value.messages) && value.messages.length > 0) {
             const message = value.messages[0];
             const contact = value.contacts?.[0];
 
-            const rawPhone = message.from;
+            const rawPhone = message.from || '';
             const cleanPhone = rawPhone.replace(/\D/g, '');
             const wamid = message.id;
 
-            // Find user in MongoDB
+            if (!cleanPhone) continue;
+
+            // Resolve existing user in MongoDB
             let dbUser = await User.findOne({
               $or: [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }]
             });
 
-            // Extract the true parent name from DB or Meta WhatsApp contact profile
-            const profileName = contact?.profile?.name;
-            const parentDisplayName =
-              (dbUser?.name && dbUser.name !== cleanPhone ? dbUser.name : null) ||
-              profileName ||
-              cleanPhone;
+            // Extract real parent name (Profile Name -> Existing DB Name -> Fallback)
+            const profileName = (contact?.profile?.name || '').trim();
+            let parentDisplayName = 'Parent';
 
-            // Upsert / update User record so the contact name is permanently stored in MongoDB
+            if (dbUser?.name && dbUser.name !== cleanPhone) {
+              parentDisplayName = dbUser.name;
+            } else if (profileName && profileName !== cleanPhone) {
+              parentDisplayName = profileName;
+            }
+
+            // Upsert / update User record with the resolved identity
             if (!dbUser || (profileName && dbUser.name === cleanPhone)) {
               dbUser = await User.findOneAndUpdate(
                 { $or: [{ phone: cleanPhone }, { phone: `+${cleanPhone}` }] },
@@ -86,6 +95,7 @@ exports.handleWebhook = async (req, res) => {
               );
             }
 
+            // Extract message content across all interactive types
             let messageText = '';
             switch (message.type) {
               case 'text':
@@ -104,7 +114,7 @@ exports.handleWebhook = async (req, res) => {
                 messageText = `[Received ${message.type}]`;
             }
 
-            // Save incoming message in MongoDB (attaching parentDisplayName to senderName)
+            // Log inbound message into MongoDB
             await Message.findOneAndUpdate(
               { wamid },
               {
@@ -124,25 +134,28 @@ exports.handleWebhook = async (req, res) => {
 
             console.log(`📥 Incoming WhatsApp from ${cleanPhone} (${parentDisplayName}): "${messageText}"`);
 
-            // Ignore self-echoes or messages originating from the admin number
+            // Prevent loops: Ignore admin number messages from triggering the AI Copilot
             if (cleanPhone === ADMIN_FORWARD_PHONE) {
               console.log('Admin number message received. Skipping bot auto-reply.');
               continue;
             }
 
-            // --- Trigger FAQ RAG Reply / Admin Escalation ---
+            // --- Trigger FAQ RAG Auto-Reply / Admin Escalation ---
             if (message.type === 'text' && messageText.trim().length >= 3) {
               try {
+                // Pass user context (phone and name) for personalized assessment link prefilling
                 const autoReplyResult = await handleAutomatedFaqReply(
                   cleanPhone,
                   messageText,
                   0.70,
-                  parentDisplayName
+                  {
+                    name: parentDisplayName !== 'Parent' ? parentDisplayName : '',
+                    phone: cleanPhone
+                  }
                 );
 
-                if (autoReplyResult.handled) {
-                  // A. Normal FAQ Match
-                  // Preserve parentDisplayName in senderName so conversation aggregations do not display bot personas
+                if (autoReplyResult?.handled) {
+                  // Option A: Grounded FAQ Answer Found (includes assessment / trial links)
                   if (autoReplyResult.type === 'faq_match') {
                     await Message.create({
                       wamid: autoReplyResult.wamid || `bot_${Date.now()}`,
@@ -164,9 +177,8 @@ exports.handleWebhook = async (req, res) => {
                     console.log(`🤖 Auto-replied to ${cleanPhone} [FAQ: ${autoReplyResult.matchedFaqId}, Score: ${autoReplyResult.score?.toFixed(4)}]`);
                   }
 
-                  // B. Unmatched Fallback -> Save holding message & admin alert log
+                  // Option B: Knowledge Gap -> Holding text to parent + Escalation alert to Admin
                   if (autoReplyResult.type === 'forwarded_to_admin') {
-                    // Holding message to parent preserves parentDisplayName
                     await Message.create({
                       wamid: autoReplyResult.parentWamid || `bot_fallback_${Date.now()}`,
                       phone: cleanPhone,
@@ -184,7 +196,6 @@ exports.handleWebhook = async (req, res) => {
                       timestamp: new Date()
                     });
 
-                    // Forwarding notification dispatched to admin
                     await Message.create({
                       wamid: autoReplyResult.adminWamid || `admin_alert_${Date.now()}`,
                       phone: ADMIN_FORWARD_PHONE,
@@ -203,7 +214,7 @@ exports.handleWebhook = async (req, res) => {
                     console.log(`🚨 Unmatched question from ${cleanPhone}. Forwarded to admin (${ADMIN_FORWARD_PHONE}).`);
                   }
                 } else {
-                  console.log(`ℹ️ Auto-reply skipped: ${autoReplyResult.reason || 'Unhandled'}`);
+                  console.log(`ℹ️ Auto-reply skipped: ${autoReplyResult?.reason || 'Unhandled'}`);
                 }
               } catch (ragError) {
                 console.error(`⚠️ RAG auto-reply failed for ${cleanPhone}:`, ragError.message);
@@ -211,8 +222,8 @@ exports.handleWebhook = async (req, res) => {
             }
           }
 
-          // 2. Process status updates (sent / delivered / read)
-          if (value.statuses && value.statuses.length > 0) {
+          // 2. Message Status Updates (sent / delivered / read)
+          if (Array.isArray(value.statuses) && value.statuses.length > 0) {
             const statusUpdate = value.statuses[0];
             await Message.updateOne(
               { wamid: statusUpdate.id },
@@ -224,8 +235,10 @@ exports.handleWebhook = async (req, res) => {
       return;
     }
 
-    // --- B. Process Meta Lead Ads Events ---
-    if (body?.object === 'page' || body?.object === 'ad_account') {
+    // =========================================================================
+    // B. PROCESS META LEAD ADS EVENTS
+    // =========================================================================
+    if (body.object === 'page' || body.object === 'ad_account') {
       for (const entry of body.entry || []) {
         for (const change of entry.changes || []) {
           if (change.field === 'leadgen') {
@@ -248,7 +261,7 @@ exports.handleWebhook = async (req, res) => {
                     name = field.values?.[0] || name;
                   }
                   if (fieldName === 'email') {
-                    email = field.values?.[0] || '';
+                    email = (field.values?.[0] || '').trim().toLowerCase();
                   }
                   if (fieldName === 'phone_number' || fieldName === 'phone') {
                     phone = (field.values?.[0] || '').replace(/\D/g, '');
@@ -258,7 +271,7 @@ exports.handleWebhook = async (req, res) => {
 
               if (phone || email) {
                 const searchQuery = [];
-                if (phone) searchQuery.push({ phone });
+                if (phone) searchQuery.push({ phone }, { phone: `+${phone}` });
                 if (email) searchQuery.push({ email });
 
                 const updatedUser = await User.findOneAndUpdate(

@@ -166,19 +166,19 @@ const sendTextMessage = async (recipientPhone, textBody, previewUrl = false) => 
 
 /**
  * Automated RAG responder:
- * - High-confidence FAQ match: Replies to the parent via AI.
- * - Low-confidence / Unmatched: Sends a holding message to the parent and forwards lead details to your personal WhatsApp.
+ * - High-confidence FAQ match: Replies to parent with personalized RAG response.
+ * - Low-confidence / Unmatched: Dispatches holding text to parent and notifies admin.
  *
  * @param {string} recipientPhone The sender's phone number
  * @param {string} incomingText The inbound inquiry from the parent
  * @param {number} minConfidenceScore Minimum cosine similarity score required (default: 0.70)
- * @param {string} senderName Optional parent name
+ * @param {object|string} userContext Optional user context object { name, phone } or string name
  */
 const handleAutomatedFaqReply = async (
   recipientPhone,
   incomingText,
   minConfidenceScore = 0.70,
-  senderName = 'Parent'
+  userContext = {}
 ) => {
   try {
     const cleanParentPhone = cleanPhoneNumber(recipientPhone);
@@ -187,8 +187,22 @@ const handleAutomatedFaqReply = async (
       return { handled: false, reason: 'Inquiry too short or empty' };
     }
 
-    // 1. Query Vector Search via your existing service
-    const ragResult = await askFaqAssistant(incomingText);
+    // Normalize userContext supporting both object and string arguments
+    const resolvedContext = typeof userContext === 'string'
+      ? { name: userContext, phone: cleanParentPhone }
+      : {
+          name: userContext?.name || 'Parent',
+          phone: userContext?.phone || cleanParentPhone
+        };
+
+    const resolvedParentName = resolvedContext.name !== 'Parent' ? resolvedContext.name : '';
+
+    // 1. Query Vector Search passing user context for dynamic assessment URL prefilling
+    const ragResult = await askFaqAssistant(incomingText, {
+      phone: cleanParentPhone,
+      name: resolvedParentName
+    });
+
     const topMatch = ragResult.matchedFaqs?.[0];
     const topScore = topMatch?.score || 0;
 
@@ -203,26 +217,32 @@ const handleAutomatedFaqReply = async (
         type: 'faq_match',
         answer: ragResult.answer,
         score: topScore,
-        matchedFaqId: topMatch.id,
+        matchedFaqId: topMatch?.id,
         wamid: metaRes?.messages?.[0]?.id,
         metaResponse: metaRes
       };
     }
 
-    // 3. Fallback Path: Score < 0.70 (Forward to your personal number + send holding note)
+    // 3. Fallback Path: Score < minConfidenceScore (Forward to admin + holding message)
     console.log(`⚠️ Low confidence score (${topScore.toFixed(4)}). Initiating fallback to admin...`);
+
+    // Build dynamic assessment link for fallback message
+   let personalizedAssessmentUrl = `https://eynko-server-production.up.railway.app/assessment/?phone=${cleanParentPhone}`;
+    if (resolvedParentName) {
+      personalizedAssessmentUrl += `&name=${encodeURIComponent(resolvedParentName)}`;
+    }
 
     const parentHoldingText =
       `Thank you for reaching out! Our team has received your specific inquiry, and Dr. Geetha will personally get back to you shortly.\n\n` +
       `In the meantime, you can explore our free online assessment or reserve a free trial session directly at your preferred time:\n` +
-      `👉 Assessment: https://eynko-server-production.up.railway.app/assessment/\n` +
+      `👉 Assessment: ${personalizedAssessmentUrl}\n` +
       `👉 Book Trial: https://cal.com/abacusforkids/abacus-trial-session`;
 
     const parentMetaRes = await sendTextMessage(cleanParentPhone, parentHoldingText, true);
 
     const adminAlertText =
       `🚨 *New WhatsApp Parent Query (Escalation)*\n\n` +
-      `*Parent Name:* ${senderName}\n` +
+      `*Parent Name:* ${resolvedContext.name}\n` +
       `*Parent Phone:* +${cleanParentPhone}\n` +
       `*Top Match Score:* ${topScore.toFixed(3)} (Threshold: ${minConfidenceScore})\n` +
       `*Question:* "${incomingText}"\n\n` +
