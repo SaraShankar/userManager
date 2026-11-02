@@ -48,9 +48,6 @@ const corsOptions = {
 // Mount CORS before any route
 app.use(cors(corsOptions));
 
-// Explicitly handle HTTP OPTIONS preflight across every route
-app.options('*', cors(corsOptions));
-
 // 4. Body Parser Middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
