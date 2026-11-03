@@ -1,3 +1,4 @@
+// updateSingleFaq.js
 require('dotenv').config();
 const mongoose = require('mongoose');
 const { OpenAI } = require('openai');
@@ -5,41 +6,51 @@ const FaqVector = require('./models/faqVectorSchema');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function updateScreenTimeFaq() {
-  await mongoose.connect(process.env.MONGODB_URI_100SUM || process.env.MONGO_URI);
+async function updateSpecificFaq() {
+  try {
+    const mongoUri = process.env.MONGODB_URI_100SUM || process.env.MONGO_URI;
+    await mongoose.connect(mongoUri);
 
-  const question = "I am concerned about screen time and avoiding phone addiction, but your course uses digital tools. Why are apps required?";
-  const answer = 
-    "We completely share your focus on avoiding passive phone and screen addiction. In our program, screen tools are never used for passive entertainment or repetitive drills. Learning abacus happens in two distinct stages:\n\n" +
-    "1. Physical Abacus Stage: Children start exclusively with the physical abacus frame, workbooks, and direct teacher guidance. During this stage, errors are physical and immediately visible for teachers to guide and correct.\n\n" +
-    "2. Mental Abacus Stage (Bead Visualization / Anzan): Once a child is fluent with the physical tool, they transition to internal visualization. At this advanced level, human observation alone cannot track the mental images inside a child's mind. Our specialized tools (TableClock, GearAnzan, OralPod, BingoBead) are essential to systematically assess mental skill levels, provide 50 stages of visualization, and offer structured error correction.\n\n" +
-    "Phased & Purpose-Driven: Digital tools are introduced only after physical proficiency is proven. By targeting internal visualization, these dedicated home tools empower students to develop mental arithmetic 3x to 4x faster with purposeful, short brain training rather than aimless screen time.";
+    const faqId = 'faq_subjects_scope_specialization';
+    const question =
+      'Do you offer instruction in subjects besides mathematics? Do you teach 11+ maths or general 11 plus tuition? Do you teach other school subjects like English, Science, or Languages? Is this only abacus math?[cite: 1]';
+    const answer =
+      "At AbacusForKids, we specialize exclusively in Abacus Mental Arithmetic[cite: 1]. We do not offer tutoring in school curriculum subjects (such as English, Science, or Humanities), nor do we teach direct 11+ Maths or exam-paper coaching[cite: 1].\n\n" +
+      "Instead, by focusing 100% on abacus calculation and mental bead visualization (Anzan), our students develop rapid calculation speed, high accuracy, and strong mental endurance[cite: 1]. While this numerical intuition provides a powerful foundation that naturally helps children excel in school and competitive 11+ exams, our curriculum is strictly dedicated to mental arithmetic[cite: 1].\n\n" +
+      "Would you like to learn more about how our abacus belt levels work or schedule a trial assessment for your child?[cite: 1]";
 
-  const input = `${question} ${answer}`.replace(/\s+/g, ' ').trim();
-  const embRes = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input
-  });
+    console.log(`Generating embedding for only: ${faqId}...`);
+    
+    // Embed question triggers
+    const input = question.replace(/\s+/g, ' ').trim();
+    const embRes = await openai.embeddings.create({
+      model: 'text-embedding-3-small',
+      input
+    });
 
-  await FaqVector.findOneAndUpdate(
-    { id: 'faq_screen_time_and_digital_tools' },
-    {
-      $set: {
-        id: 'faq_screen_time_and_digital_tools',
-        question,
-        answer,
-        embedding: embRes.data[0].embedding,
-        metadata: {
-          category: 'Pedagogy & Digital Tools',
-          updatedAt: new Date()
+    await FaqVector.findOneAndUpdate(
+      { id: faqId },
+      {
+        $set: {
+          id: faqId,
+          question,
+          answer,
+          embedding: embRes.data[0].embedding,
+          metadata: {
+            category: 'Curriculum & Subjects',
+            updatedAt: new Date()
+          }
         }
-      }
-    },
-    { upsert: true, returnDocument: 'after' }
-  );
+      },
+      { upsert: true, returnDocument: 'after' }
+    );
 
-  console.log("✅ Screen time & digital tools FAQ indexed successfully!");
-  process.exit(0);
+    console.log(`✅ Only ${faqId} was updated!`);
+    process.exit(0);
+  } catch (err) {
+    console.error(err);
+    process.exit(1);
+  }
 }
 
-updateScreenTimeFaq();
+updateSpecificFaq();

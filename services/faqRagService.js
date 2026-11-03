@@ -3,13 +3,16 @@ const FaqVector = require('../models/faqVectorSchema');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Scores below 0.70 indicate weak semantic relevance to your stored FAQs
-const SIMILARITY_THRESHOLD = 0.70;
+// Confidence thresholds for 3-tier routing
+const SIMILARITY_HIGH = 0.60;
+const SIMILARITY_MEDIUM = 0.30;
 
 /**
- * Answers incoming parent questions using Atlas Vector Search + OpenAI RAG.
+ * Answers incoming parent questions using Atlas Vector Search + OpenAI RAG with 3-tier confidence routing.
+ *
  * @param {string} userQuestion - The question sent by the parent.
  * @param {object} [userContext] - Optional context: { phone, name }
+ * @returns {Promise<object>} Result containing tier (HIGH | MEDIUM | LOW), answer text, button flags, and metadata.
  */
 async function askFaqAssistant(userQuestion, userContext = {}) {
   if (!userQuestion || typeof userQuestion !== 'string') {
@@ -20,7 +23,6 @@ async function askFaqAssistant(userQuestion, userContext = {}) {
   const cleanPhone = (userContext.phone || '').replace(/\D/g, '');
   const encodedName = encodeURIComponent((userContext.name || '').trim());
 
-  // Construct personalized assessment URL using /assessment/
   let assessmentLink = 'https://eynko-server-production.up.railway.app/assessment/';
   const queryParams = [];
   if (cleanPhone) queryParams.push(`phone=${cleanPhone}`);
@@ -64,15 +66,21 @@ async function askFaqAssistant(userQuestion, userContext = {}) {
   const topMatch = matchedDocs[0];
   const topScore = topMatch?.score || 0;
 
-  // Layer 1 Safeguard: Vector similarity check
-  if (!matchedDocs.length || topScore < SIMILARITY_THRESHOLD) {
-    return {
-      isMatch: false,
-      topScore,
-      answer: null,
-      resources: [],
-      matchedFaqs: [],
-    };
+  const fallbackPayload = {
+    isMatch: false,
+    tier: 'LOW',
+    topScore,
+    answer:
+      "I don't have the exact details on that right now. Please reach out directly to Dr. Geetha's team on WhatsApp, and we will assist you right away!",
+    showClarificationButton: false,
+    resources: [],
+    matchedFaqId: null,
+    matchedFaqs: [],
+  };
+
+  // Tier 3: Score below medium floor (Low Confidence / Unrelated)
+  if (!matchedDocs.length || topScore < SIMILARITY_MEDIUM) {
+    return fallbackPayload;
   }
 
   // 4. Assemble Grounding Context
@@ -80,7 +88,6 @@ async function askFaqAssistant(userQuestion, userContext = {}) {
     .map((doc, idx) => `[Source ${idx + 1} (${doc.id})]\nQuestion: ${doc.question}\nAnswer: ${doc.answer}`)
     .join('\n\n---\n\n');
 
-  // Layer 2 Safeguard: Grounded system instructions
   const systemPrompt = `You are the official parent-support AI assistant for Dr. Geetha's AbacusForKids program in Bushey, Harrow, and Kenton.
 
 STRICT INSTRUCTIONS:
@@ -88,10 +95,11 @@ STRICT INSTRUCTIONS:
 2. If the VERIFIED KNOWLEDGE does not contain a specific, direct answer to the parent's inquiry (e.g., questions about classroom visits, policies not documented, custom pricing requests, or special accommodations), you MUST reply with the exact token: [TRIGGER_ADMIN_FALLBACK]
 3. NEVER make assumptions, speculate, or say phrases like "While we don't mention...", "We do not explicitly state...", or suggest unrelated alternatives when the direct answer is missing.
 4. If the answer IS explicitly supported by the context:
-   - Provide an empathetic, authoritative, and concise response.
-   - Mention key concepts where relevant: 10-20 min daily home practice as a "brain warm-up", the bi-quinary 1+4 abacus frame reducing workload by ~75%, and 11+ grammar school pathways.
-   - When discussing trial sessions, offer this link: https://cal.com/abacusforkids/abacus-trial-session
-   - When discussing skill level, enrollment readiness, or assessments, invite the parent to use this personalized assessment link: ${assessmentLink}`;
+- Provide an empathetic, authoritative, and concise response.
+- Mention key concepts where relevant: 10-20 min daily home practice as a "brain warm-up", the bi-quinary 1+4 abacus frame reducing workload by ~75%, and 11+ grammar school pathways.
+- When discussing trial sessions, offer this link: https://cal.com/abacusforkids/abacus-trial-session
+- When discussing skill level, enrollment readiness, or assessments, invite the parent to use this personalized assessment link: 
+${assessmentLink}`;
 
   // 5. Generate AI Completion
   const chatResponse = await openai.chat.completions.create({
@@ -105,14 +113,12 @@ STRICT INSTRUCTIONS:
 
   const completionText = (chatResponse.choices[0]?.message?.content || '').trim();
 
-  // Layer 3 Safeguard: Intercept model refusal to trigger human handover
+  // Guardrail refusal check
   if (completionText.includes('[TRIGGER_ADMIN_FALLBACK]') || completionText.length === 0) {
-    console.log(`🛡️ RAG Guardrail: Knowledge gap detected for query: "${userQuestion}". Triggering fallback.`);
+    console.log(`🛡️ RAG Guardrail: Knowledge gap detected for query: "${userQuestion}". Falling back.`);
     return {
-      isMatch: false,
+      ...fallbackPayload,
       topScore,
-      answer: null,
-      resources: [],
       matchedFaqs: matchedDocs.map((doc) => ({
         id: doc.id,
         question: doc.question,
@@ -122,17 +128,21 @@ STRICT INSTRUCTIONS:
   }
 
   const resources = matchedDocs.flatMap((doc) => doc.downloadable_resources || []);
+  const isHighConfidence = topScore >= SIMILARITY_HIGH;
 
   return {
     isMatch: true,
+    tier: isHighConfidence ? 'HIGH' : 'MEDIUM',
     topScore,
     answer: completionText,
+    showClarificationButton: !isHighConfidence, // true when 0.30 <= topScore < 0.60
+    matchedFaqId: topMatch.id,
+    resources,
     matchedFaqs: matchedDocs.map((doc) => ({
       id: doc.id,
       question: doc.question,
       score: doc.score,
     })),
-    resources,
   };
 }
 
