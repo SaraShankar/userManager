@@ -2,15 +2,27 @@ const express = require('express');
 const router = express.Router();
 
 // Controllers
-const adsController = require('../controllers/adsController');
 const ragController = require('../controllers/ragController');
+const adsController = require('../controllers/adsController');
 
-// Ads Routes
-router.route('/ads/campaigns')
-  .get(adsController.listCampaigns)
-  .post(adsController.createCampaign);
+// 1. Ads Routes (Guarded so missing methods don't crash startup)
+if (adsController && typeof adsController.listCampaigns === 'function') {
+  router.get('/ads/campaigns', adsController.listCampaigns);
+}
+if (adsController && typeof adsController.createCampaign === 'function') {
+  router.post('/ads/campaigns', adsController.createCampaign);
+}
 
-// RAG Vector Search Endpoint
-router.post('/rag/query', ragController.searchKnowledgeBase);
+// 2. RAG Vector Search Endpoint
+if (typeof ragController.searchKnowledgeBase === 'function') {
+  router.post('/rag/query', ragController.searchKnowledgeBase);
+}
+
+// 3. Web Chat Endpoint (for WordPress Deep Chat widget)
+if (typeof ragController.handleWebChat === 'function') {
+  router.post('/web-chat', ragController.handleWebChat);
+} else {
+  console.warn('⚠️ Warning: ragController.handleWebChat is not defined!');
+}
 
 module.exports = router;

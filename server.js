@@ -9,6 +9,7 @@ const webhookRoutes = require('./routes/webhookRoutes');
 const userAdminRoutes = require('./routes/userAdminRoutes');
 const faqRoutes = require('./routes/faqRoutes');
 const assessmentRoutes = require('./routes/assessmentRoutes');
+const apiRoutes = require('./routes/apiRoutes'); // <-- Added for web-chat & ads/rag routes
 
 const app = express();
 
@@ -24,6 +25,8 @@ mongoose.set('bufferCommands', false);
 
 // 3. Robust Cross-Origin Resource Sharing (CORS) Configuration
 const allowedOrigins = [
+  'https://www.abacusforkids.com',
+  'https://abacusforkids.com',
   'https://eynko-server-production.up.railway.app',
   'https://usermanager-production-a71a.up.railway.app',
   'http://localhost:3000',
@@ -74,6 +77,7 @@ app.use('/api/webhooks', webhookRoutes);
 app.use('/api/admin', userAdminRoutes);
 app.use('/api/faq', faqRoutes);
 app.use('/api/assessment', assessmentRoutes);
+app.use('/api', apiRoutes); // <-- Mounts /api/web-chat and /api/rag/query
 
 // 7. Global 404 Handler for Unmatched Routes
 app.use((req, res) => {
