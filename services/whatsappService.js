@@ -1,14 +1,29 @@
 const axios = require('axios');
 const { askFaqAssistant } = require('./faqRagService');
+const { sendTelegramAdminAlert } = require('./telegramService');
 
-const ADMIN_FORWARD_PHONE = process.env.ADMIN_PHONE_NUMBER || '447943611154';
+const RAW_ADMIN_PHONE = process.env.ADMIN_PHONE_NUMBER || '447943611154';
+
+/**
+ * Sanitizes phone numbers to standard E.164 digits format (without '+')
+ */
+const cleanPhoneNumber = (phone) => {
+  if (!phone) return '';
+  return String(phone).replace(/\D/g, '');
+};
+
+const ADMIN_FORWARD_PHONE = cleanPhoneNumber(RAW_ADMIN_PHONE);
 
 /**
  * Core helper to dispatch HTTP requests to Meta Graph API
  */
 const sendMetaRequest = async (payload) => {
-  const token = process.env.META_WA_ACCESS_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN || process.env.WHATSAPP_TOKEN;
-  const phoneAccountId = process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.META_WA_PHONE_NUMBER_ID;
+  const token =
+    process.env.META_WA_ACCESS_TOKEN ||
+    process.env.WHATSAPP_ACCESS_TOKEN ||
+    process.env.WHATSAPP_TOKEN;
+  const phoneAccountId =
+    process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.META_WA_PHONE_NUMBER_ID;
 
   if (!token || !phoneAccountId) {
     throw new Error('Meta API Access Token or Phone Number ID is missing in environment variables.');
@@ -39,14 +54,6 @@ const sendMetaRequest = async (payload) => {
 
     throw new Error(`${errorCode}${errorMessage}`);
   }
-};
-
-/**
- * Sanitizes phone numbers to standard E.164 digits format (without '+')
- */
-const cleanPhoneNumber = (phone) => {
-  if (!phone) return '';
-  return String(phone).replace(/\D/g, '');
 };
 
 /**
@@ -167,7 +174,7 @@ const sendTextMessage = async (recipientPhone, textBody, previewUrl = false) => 
 /**
  * Automated RAG responder:
  * - High-confidence FAQ match: Replies to parent with personalized RAG response.
- * - Low-confidence / Unmatched: Dispatches holding text to parent and notifies admin.
+ * - Low-confidence / Unmatched: Dispatches holding text to parent and notifies admin via Telegram.
  *
  * @param {string} recipientPhone The sender's phone number
  * @param {string} incomingText The inbound inquiry from the parent
@@ -223,11 +230,11 @@ const handleAutomatedFaqReply = async (
       };
     }
 
-    // 3. Fallback Path: Score < minConfidenceScore (Forward to admin + holding message)
-    console.log(`⚠️ Low confidence score (${topScore.toFixed(4)}). Initiating fallback to admin...`);
+    // 3. Fallback Path: Score < minConfidenceScore (Escalate to Telegram + Send holding message to parent)
+    console.log(`⚠️ Low confidence score (${topScore.toFixed(4)}). Initiating Telegram admin escalation...`);
 
     // Build dynamic assessment link for fallback message
-   let personalizedAssessmentUrl = `https://eynko-server-production.up.railway.app/assessment/?phone=${cleanParentPhone}`;
+    let personalizedAssessmentUrl = `https://eynko-server-production.up.railway.app/assessment/?phone=${cleanParentPhone}`;
     if (resolvedParentName) {
       personalizedAssessmentUrl += `&name=${encodeURIComponent(resolvedParentName)}`;
     }
@@ -238,26 +245,38 @@ const handleAutomatedFaqReply = async (
       `👉 Assessment: ${personalizedAssessmentUrl}\n` +
       `👉 Book Trial: https://cal.com/abacusforkids/abacus-trial-session`;
 
+    // 3a. Reassure the parent on WhatsApp (safe within the 24h inbound window)
     const parentMetaRes = await sendTextMessage(cleanParentPhone, parentHoldingText, true);
 
-    const adminAlertText =
-      `🚨 *New WhatsApp Parent Query (Escalation)*\n\n` +
-      `*Parent Name:* ${resolvedContext.name}\n` +
-      `*Parent Phone:* +${cleanParentPhone}\n` +
-      `*Top Match Score:* ${topScore.toFixed(3)} (Threshold: ${minConfidenceScore})\n` +
-      `*Question:* "${incomingText}"\n\n` +
-      `👉 Direct Reply Link: https://wa.me/${cleanParentPhone}`;
+    // 3b. Dispatch rich Telegram notification to Admin
+    const telegramAlertHtml =
+      `🚨 <b>New WhatsApp Parent Query (Escalation)</b>\n\n` +
+      `👤 <b>Parent Name:</b> ${resolvedContext.name}\n` +
+      `📞 <b>Parent Phone:</b> +${cleanParentPhone}\n` +
+      `🎯 <b>Top Score:</b> ${topScore.toFixed(3)} (Threshold: ${minConfidenceScore})\n` +
+      `💬 <b>Question:</b>\n"<i>${incomingText}</i>"\n\n` +
+      `👉 <a href="https://wa.me/${cleanParentPhone}"><b>Reply on WhatsApp</b></a>`;
 
-    const adminMetaRes = await sendTextMessage(ADMIN_FORWARD_PHONE, adminAlertText, false);
+    const telegramRes = await sendTelegramAdminAlert(telegramAlertHtml);
+
+    // 3c. Optional WhatsApp copy to admin (best effort fallback)
+    let adminWamid = null;
+    try {
+      const adminMetaRes = await sendTextMessage(ADMIN_FORWARD_PHONE, telegramAlertHtml.replace(/<[^>]*>/g, ''), false);
+      adminWamid = adminMetaRes?.messages?.[0]?.id;
+    } catch (_) {
+      // Swallowed silently since Telegram guarantees delivery
+    }
 
     return {
       handled: true,
       type: 'forwarded_to_admin',
       answer: parentHoldingText,
-      adminAlertText,
+      adminAlertText: telegramAlertHtml,
       score: topScore,
       parentWamid: parentMetaRes?.messages?.[0]?.id,
-      adminWamid: adminMetaRes?.messages?.[0]?.id
+      adminWamid,
+      telegramDelivered: Boolean(telegramRes?.ok)
     };
   } catch (error) {
     console.error('❌ Automated FAQ reply failed:', error.message);
