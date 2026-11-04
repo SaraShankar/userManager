@@ -2,8 +2,16 @@
 const { OpenAI } = require('openai');
 const FaqVector = require('../models/faqVectorSchema');
 const { askFaqAssistant } = require('../services/faqRagService');
-
+const { sendTelegramAdminAlert } = require('../services/telegramService');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Helper to escape HTML characters so user input doesn't break Telegram HTML parsing
+const escapeHtml = (text = '') => {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+};
 
 // 1. Vector Search
 exports.searchKnowledgeBase = async (req, res) => {
@@ -65,7 +73,7 @@ exports.searchKnowledgeBase = async (req, res) => {
   }
 };
 
-// 2. Web Chat Handler (Make sure this export is present)
+// 2. Web Chat Handler
 exports.handleWebChat = async (req, res) => {
   try {
     const { message, sessionId, name, phone } = req.body;
@@ -74,14 +82,38 @@ exports.handleWebChat = async (req, res) => {
       return res.status(400).json({ reply: 'Please provide a valid question.' });
     }
 
+    const rawPhone = phone ? String(phone) : '';
+    const cleanPhone = rawPhone.replace(/\D/g, '');
+
     const result = await askFaqAssistant(message, {
       name: name || '',
-      phone: phone || '',
+      phone: cleanPhone,
     });
 
     if (!result.isMatch || !result.answer) {
+      const visitorName = escapeHtml(name || 'Anonymous Visitor');
+      const safeMessage = escapeHtml(message);
+      const topScoreVal = result.topScore ?? result.score ?? 0;
+
+      const replyAction = cleanPhone
+        ? `👉 <a href="https://wa.me/${cleanPhone}"><b>Reply to Parent on WhatsApp</b></a>\n👉 Direct App Link: whatsapp://send?phone=${cleanPhone}`
+        : `<i>No phone number provided by web visitor</i>`;
+
+      const telegramAlertHtml =
+        `🌐 <b>New Website Chat Query (Escalation)</b>\n\n` +
+        `👤 <b>Visitor:</b> ${visitorName}\n` +
+        `📞 <b>Phone:</b> ${cleanPhone ? '+' + cleanPhone : 'Not provided'}\n` +
+        `🎯 <b>Top Score:</b> ${topScoreVal.toFixed(3)}\n` +
+        `💬 <b>Question:</b>\n"<i>${safeMessage}</i>"\n\n` +
+        replyAction;
+
+      // Send Telegram alert in background (non-blocking)
+      sendTelegramAdminAlert(telegramAlertHtml).catch((err) =>
+        console.error('Failed to dispatch web chat Telegram alert:', err.message)
+      );
+
       return res.status(200).json({
-        reply: "I don't have the exact details on that right now. Please reach out directly to Dr. Geetha's team on WhatsApp, and we will assist you right away!",
+        reply: "I don't have the exact details on that right now. Our team has been notified, or you can reach out directly to Dr. Geetha on WhatsApp at https://wa.me/447337648764!",
         fallback: true,
       });
     }
