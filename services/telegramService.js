@@ -1,15 +1,16 @@
+require('dotenv').config();
 const axios = require('axios');
 
 /**
  * Sends an instant notification to your Telegram admin chat.
- * @param {string} text Markdown-formatted notification message
+ * @param {string} text HTML-formatted notification message
  */
 const sendTelegramAdminAlert = async (text) => {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_ADMIN_CHAT_ID;
 
   if (!token || !chatId) {
-    console.warn('⚠️ Telegram bot token or admin chat ID missing in environment variables.');
+    console.warn(`⚠️ Telegram bot token or admin chat ID missing in environment variables. (token exists: ${Boolean(token)}, chatId exists: ${Boolean(chatId)})`);
     return null;
   }
 
