@@ -1,9 +1,14 @@
 const Message = require('../models/messageSchema');
 const User = require('../models/userSchema');
 const metaAdsService = require('../services/metaAdsService');
-const { handleAutomatedFaqReply } = require('../services/whatsappService');
+const { askFaqAssistant } = require('../services/faqRagService');
+const { sendWhatsAppMessage } = require('../services/whatsappService');
 
 const ADMIN_FORWARD_PHONE = process.env.ADMIN_PHONE_NUMBER || '447943611154';
+const APP_BASE_URL =
+  process.env.APP_BASE_URL ||
+  process.env.PUBLIC_URL ||
+  'https://usermanager-production-a71a.up.railway.app';
 
 /**
  * Meta Webhook Verification (GET)
@@ -140,84 +145,100 @@ exports.handleWebhook = async (req, res) => {
               continue;
             }
 
-            // --- Trigger FAQ RAG Auto-Reply / Admin Escalation ---
-            if (message.type === 'text' && messageText.trim().length >= 3) {
+            // --- Unified 3-Tier RAG Execution ---
+            if (message.type === 'text' && messageText.trim().length >= 2) {
               try {
-                // Pass user context (phone and name) for personalized assessment link prefilling
-                const autoReplyResult = await handleAutomatedFaqReply(
-                  cleanPhone,
-                  messageText,
-                  0.70,
-                  {
-                    name: parentDisplayName !== 'Parent' ? parentDisplayName : '',
-                    phone: cleanPhone
-                  }
-                );
+                // Pass user context for dynamic assessment URL generation
+                const ragResult = await askFaqAssistant(messageText, {
+                  name: parentDisplayName !== 'Parent' ? parentDisplayName : '',
+                  phone: cleanPhone
+                });
 
-                if (autoReplyResult?.handled) {
-                  // Option A: Grounded FAQ Answer Found (includes assessment / trial links)
-                  if (autoReplyResult.type === 'faq_match') {
-                    await Message.create({
-                      wamid: autoReplyResult.wamid || `bot_${Date.now()}`,
-                      phone: cleanPhone,
-                      senderName: parentDisplayName,
-                      botPersona: 'Abacus AI Copilot',
-                      direction: 'outbound',
-                      text: autoReplyResult.answer,
-                      status: 'sent',
-                      metadata: {
-                        isAutomated: true,
-                        botName: 'Abacus AI Copilot',
-                        matchedFaqId: autoReplyResult.matchedFaqId,
-                        confidenceScore: autoReplyResult.score
-                      },
-                      timestamp: new Date()
-                    });
+                const { tier, answer, score, matchedFaqId } = ragResult;
+                console.log(`🎯 RAG Evaluated: Tier=${tier}, Score=${score?.toFixed(4)}, FAQ=${matchedFaqId}`);
 
-                    console.log(`🤖 Auto-replied to ${cleanPhone} [FAQ: ${autoReplyResult.matchedFaqId}, Score: ${autoReplyResult.score?.toFixed(4)}]`);
-                  }
+                // TIER 1 & TIER 2: HIGH (>= 0.60) or BORDERLINE (0.30 - 0.59 with answer)
+                if ((tier === 'HIGH' || tier === 'MEDIUM') && answer) {
+                  const sendRes = await sendWhatsAppMessage(cleanPhone, answer);
+                  const outboundWamid = sendRes?.messages?.[0]?.id || `bot_${Date.now()}`;
 
-                  // Option B: Knowledge Gap -> Holding text to parent + Escalation alert to Admin
-                  if (autoReplyResult.type === 'forwarded_to_admin') {
-                    await Message.create({
-                      wamid: autoReplyResult.parentWamid || `bot_fallback_${Date.now()}`,
-                      phone: cleanPhone,
-                      senderName: parentDisplayName,
-                      botPersona: 'Abacus AI Copilot',
-                      direction: 'outbound',
-                      text: autoReplyResult.answer,
-                      status: 'sent',
-                      metadata: {
-                        isAutomated: true,
-                        botName: 'Abacus AI Copilot',
-                        escalatedToAdmin: true,
-                        confidenceScore: autoReplyResult.score
-                      },
-                      timestamp: new Date()
-                    });
+                  await Message.create({
+                    wamid: outboundWamid,
+                    phone: cleanPhone,
+                    senderName: parentDisplayName,
+                    botPersona: 'Abacus AI Copilot',
+                    direction: 'outbound',
+                    text: answer,
+                    status: 'sent',
+                    metadata: {
+                      isAutomated: true,
+                      botName: 'Abacus AI Copilot',
+                      tier,
+                      matchedFaqId,
+                      confidenceScore: score
+                    },
+                    timestamp: new Date()
+                  });
 
-                    await Message.create({
-                      wamid: autoReplyResult.adminWamid || `admin_alert_${Date.now()}`,
-                      phone: ADMIN_FORWARD_PHONE,
-                      senderName: 'Abacus Lead Escalator',
-                      botPersona: 'Abacus Lead Escalator',
-                      direction: 'outbound',
-                      text: autoReplyResult.adminAlertText,
-                      status: 'sent',
-                      metadata: {
-                        isAlert: true,
-                        originatingParentPhone: cleanPhone
-                      },
-                      timestamp: new Date()
-                    });
+                  console.log(`🤖 Auto-replied to ${cleanPhone} [Tier: ${tier}, FAQ: ${matchedFaqId}, Score: ${score?.toFixed(4)}]`);
+                } 
+                // TIER 3: LOW CONFIDENCE (< 0.30) -> Escalation to Dr. Geetha
+                else {
+                  const fallbackHoldingText =
+                    `Thank you for reaching out! Our team has received your inquiry, and Dr. Geetha will personally get back to you shortly.\n\n` +
+                    `In the meantime, you can explore our free online assessment or reserve a free trial session directly at your preferred time:\n` +
+                    `👉 Assessment: ${APP_BASE_URL}/assessment/?phone=${cleanPhone}&name=${encodeURIComponent(parentDisplayName !== 'Parent' ? parentDisplayName : '')}`;
 
-                    console.log(`🚨 Unmatched question from ${cleanPhone}. Forwarded to admin (${ADMIN_FORWARD_PHONE}).`);
-                  }
-                } else {
-                  console.log(`ℹ️ Auto-reply skipped: ${autoReplyResult?.reason || 'Unhandled'}`);
+                  const parentSendRes = await sendWhatsAppMessage(cleanPhone, fallbackHoldingText);
+                  const parentWamid = parentSendRes?.messages?.[0]?.id || `bot_fallback_${Date.now()}`;
+
+                  await Message.create({
+                    wamid: parentWamid,
+                    phone: cleanPhone,
+                    senderName: parentDisplayName,
+                    botPersona: 'Abacus AI Copilot',
+                    direction: 'outbound',
+                    text: fallbackHoldingText,
+                    status: 'sent',
+                    metadata: {
+                      isAutomated: true,
+                      botName: 'Abacus AI Copilot',
+                      escalatedToAdmin: true,
+                      confidenceScore: score
+                    },
+                    timestamp: new Date()
+                  });
+
+                  // Forward alert notification to Admin phone
+                  const adminAlertText =
+                    `🚨 *Unmatched Parent Query Alert*\n\n` +
+                    `*From:* ${parentDisplayName} (+${cleanPhone})\n` +
+                    `*Query:* "${messageText}"\n` +
+                    `*Best Score:* ${score ? score.toFixed(4) : 'N/A'}\n\n` +
+                    `Reply directly via WhatsApp: https://wa.me/${cleanPhone}`;
+
+                  const adminSendRes = await sendWhatsAppMessage(ADMIN_FORWARD_PHONE, adminAlertText);
+                  const adminWamid = adminSendRes?.messages?.[0]?.id || `admin_alert_${Date.now()}`;
+
+                  await Message.create({
+                    wamid: adminWamid,
+                    phone: ADMIN_FORWARD_PHONE,
+                    senderName: 'Abacus Lead Escalator',
+                    botPersona: 'Abacus Lead Escalator',
+                    direction: 'outbound',
+                    text: adminAlertText,
+                    status: 'sent',
+                    metadata: {
+                      isAlert: true,
+                      originatingParentPhone: cleanPhone
+                    },
+                    timestamp: new Date()
+                  });
+
+                  console.log(`🚨 Low confidence query from ${cleanPhone}. Escalated to admin (${ADMIN_FORWARD_PHONE}).`);
                 }
               } catch (ragError) {
-                console.error(`⚠️ RAG auto-reply failed for ${cleanPhone}:`, ragError.message);
+                console.error(`⚠️ RAG execution failed for ${cleanPhone}:`, ragError.message);
               }
             }
           }
