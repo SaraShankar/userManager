@@ -3,6 +3,7 @@ const User = require('../models/userSchema');
 const metaAdsService = require('../services/metaAdsService');
 const { askFaqAssistant } = require('../services/faqRagService');
 const { sendWhatsAppMessage } = require('../services/whatsappService');
+const { buildWeeklyBoosterReport } = require('../services/boosterReportService');
 
 const ADMIN_FORWARD_PHONE = process.env.ADMIN_PHONE_NUMBER || '447943611154';
 const APP_BASE_URL =
@@ -143,6 +144,39 @@ exports.handleWebhook = async (req, res) => {
             if (cleanPhone === ADMIN_FORWARD_PHONE) {
               console.log('Admin number message received. Skipping bot auto-reply.');
               continue;
+            }
+
+            // --- Instant Booster WeekReport Command (Before RAG) ---
+            const normalizedCmd = messageText.trim().toLowerCase().replace(/[^a-z]/g, '');
+            if (['weekreport', 'weeklyreport', 'boosterreport'].includes(normalizedCmd)) {
+              try {
+                const reportText = await buildWeeklyBoosterReport(cleanPhone);
+                if (reportText) {
+                  const reportSendRes = await sendWhatsAppMessage(cleanPhone, reportText);
+                  const reportWamid = reportSendRes?.messages?.[0]?.id || `weekreport_${Date.now()}`;
+
+                  await Message.create({
+                    wamid: reportWamid,
+                    phone: cleanPhone,
+                    senderName: parentDisplayName,
+                    botPersona: 'Abacus Weekly Reporter',
+                    direction: 'outbound',
+                    text: reportText,
+                    status: 'sent',
+                    metadata: {
+                      isAutomated: true,
+                      botName: 'Abacus Weekly Reporter',
+                      command: 'WeekReport'
+                    },
+                    timestamp: new Date()
+                  });
+
+                  console.log(`📊 Sent Weekly Booster Report to ${cleanPhone} (${parentDisplayName})`);
+                  continue;
+                }
+              } catch (reportErr) {
+                console.error(`⚠️ Weekly Booster Report failed for ${cleanPhone}:`, reportErr.message);
+              }
             }
 
             // --- Unified 3-Tier RAG Execution ---
