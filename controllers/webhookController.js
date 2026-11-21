@@ -4,6 +4,7 @@ const metaAdsService = require('../services/metaAdsService');
 const { askFaqAssistant } = require('../services/faqRagService');
 const { sendWhatsAppMessage } = require('../services/whatsappService');
 const { buildWeeklyBoosterReport } = require('../services/boosterReportService');
+const { askStudentPerformanceRag } = require('../services/studentPerformanceRagService');
 
 const ADMIN_FORWARD_PHONE = process.env.ADMIN_PHONE_NUMBER || '447943611154';
 const APP_BASE_URL =
@@ -176,6 +177,100 @@ exports.handleWebhook = async (req, res) => {
                 }
               } catch (reportErr) {
                 console.error(`⚠️ Weekly Booster Report failed for ${cleanPhone}:`, reportErr.message);
+              }
+            }
+
+            
+            // --- Parent-Initiated Booster Unlock ("BST-29711 unlock") ---
+            if (message.type === 'text') {
+              const unlockMatch =
+                messageText.match(/\b(BST-\d{4,6})\b[\s\S]*?\bunlock\b/i) ||
+                messageText.match(/\bunlock\b[\s\S]*?\b(BST-\d{4,6})\b/i);
+
+              if (unlockMatch) {
+                const studentCode = (unlockMatch[1] || unlockMatch[2] || '').toUpperCase();
+                const boosterBaseUrl = (process.env.BOOSTER_SERVER_URL || 'https://booster-server-production.up.railway.app').replace(/\/$/, '');
+                let replyText = '';
+
+                try {
+                  const unlockResp = await fetch(`${boosterBaseUrl}/api/boosters/unlock/by-code`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ studentCode, requesterPhone: cleanPhone })
+                  });
+                  const unlockData = await unlockResp.json();
+
+                  if (unlockResp.ok && unlockData?.ok) {
+                    const s = unlockData.student;
+                    replyText = [
+                      `🔓 *Booster Access Unlocked!*`,
+                      `👤 Student: *${s.name}* (${s.studentCode})`,
+                      `🎓 Level ${s.level} | Batch: ${s.batchCode}`,
+                      `✅ Status: Active student verified & unlocked. Tap *"Refresh Status"* on the Booster screen to enter today's lobby!`
+                    ].join('\n');
+                  } else {
+                    replyText = `⚠️ ${unlockData?.error || `Could not unlock ${studentCode}. Please contact your Abacus Centre admin.`}`;
+                  }
+                } catch (unlockErr) {
+                  console.error(`❌ Booster unlock-by-code error for ${studentCode}:`, unlockErr.message);
+                  replyText = `⚠️ We could not reach the Booster server to unlock ${studentCode} right now. Please try again in a moment.`;
+                }
+
+                const sendRes = await sendWhatsAppMessage(cleanPhone, replyText);
+                const outboundWamid = sendRes?.messages?.[0]?.id || `unlock_${Date.now()}`;
+
+                await Message.create({
+                  wamid: outboundWamid,
+                  phone: cleanPhone,
+                  senderName: parentDisplayName,
+                  botPersona: '100Sums Booster Copilot',
+                  direction: 'outbound',
+                  text: replyText,
+                  status: 'sent',
+                  metadata: {
+                    isAutomated: true,
+                    botName: '100Sums Booster Copilot',
+                    command: 'BoosterUnlock',
+                    studentCode
+                  },
+                  timestamp: new Date()
+                });
+
+                console.log(`🔓 Processed WhatsApp Booster unlock for ${studentCode} from ${cleanPhone}`);
+                continue;
+              }
+            }
+
+            // --- Student Performance RAG (Centre-Admin Approved Evaluations Only) ---
+            if (message.type === 'text' && messageText.trim().length >= 3) {
+              try {
+                const perfRag = await askStudentPerformanceRag(cleanPhone, messageText);
+                if (perfRag?.answer) {
+                  const perfSendRes = await sendWhatsAppMessage(cleanPhone, perfRag.answer);
+                  const perfWamid = perfSendRes?.messages?.[0]?.id || `perfrag_${Date.now()}`;
+
+                  await Message.create({
+                    wamid: perfWamid,
+                    phone: cleanPhone,
+                    senderName: parentDisplayName,
+                    botPersona: 'Abacus Student Progress AI',
+                    direction: 'outbound',
+                    text: perfRag.answer,
+                    status: 'sent',
+                    metadata: {
+                      isAutomated: true,
+                      botName: 'Abacus Student Progress AI',
+                      ragType: 'STUDENT_PERFORMANCE',
+                      score: perfRag.topScore
+                    },
+                    timestamp: new Date()
+                  });
+
+                  console.log(`🎓 Sent Approved Student Performance RAG reply to ${cleanPhone}`);
+                  continue;
+                }
+              } catch (perfErr) {
+                console.error(`⚠️ Student Performance RAG error for ${cleanPhone}:`, perfErr.message);
               }
             }
 
